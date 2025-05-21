@@ -141,7 +141,7 @@ def diffusion_loss(
 
     # 6. NLL
     log_p_theta = jnp.take_along_axis(logits, input_ids[..., None], axis=-1)[..., 0]
-    per_token_loss = -loss_scale * log_p_theta * attn_mask
+    per_token_loss = loss_scale * log_p_theta * attn_mask
     mean_loss = per_token_loss.sum() / attn_mask.sum()
 
     metrics = create_metrics(mean_loss)

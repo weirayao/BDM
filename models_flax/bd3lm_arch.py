@@ -89,7 +89,6 @@ def block_diff_mask(
     block_diag = (block_q == block_k) & (x0_flag_q == x0_flag_k)
     offset_block_causal = (block_q > block_k) & x0_flag_k & (~x0_flag_q)
     block_causal = (block_q >= block_k) & x0_flag_k & x0_flag_q
-    breakpoint()
     return block_diag | offset_block_causal | block_causal
 
 

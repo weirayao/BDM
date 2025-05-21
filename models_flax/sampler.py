@@ -703,7 +703,7 @@ def sample_semi_ar(
                 first_hitting=first_hitting,
             )
     
-    return x_accum
+    return x_accum 
 
 
 def sample_tpu_simple(

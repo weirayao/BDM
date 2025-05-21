@@ -251,7 +251,7 @@ def get_nucleus_sampling_probs(probs: jnp.ndarray, p: float = 0.9) -> jnp.ndarra
     
     # Normalize
     reordered_probs = reordered_probs / (reordered_probs.sum(axis=-1, keepdims=True) + 1e-9)
-    return reordered_probs
+    return reordered_probs 
 
 
 def get_nucleus_sampling_probs_tpu_compatible(probs: jnp.ndarray, p: float = 0.9) -> jnp.ndarray:
