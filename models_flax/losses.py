@@ -17,11 +17,11 @@ from .bd3lm_arch import BD3LMConfig, BD3LMFlax
 from .noise_schedule import NoiseSchedule
 
 
-class LossMetrics(dict):
-    """Simple container for scalar metrics – detaches DeviceArrays."""
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, jax.device_get(value))
+# Use the metrics dictionary in a JAX-traceable way
+# Don't attempt to convert to Python types in the compiled code path
+def create_metrics(loss_value):
+    """Create a simple dictionary of metrics that stays as JAX arrays."""
+    return {"loss": loss_value}  # Keep as JAX array
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ def diffusion_loss(
     schedule: NoiseSchedule,
     batch: Dict[str, jnp.ndarray],
     rng: jax.random.KeyArray,
-) -> Tuple[jnp.ndarray, LossMetrics, Any]:
+) -> Tuple[jnp.ndarray, Dict[str, float], Any]:
     """Compute SUBS loss for one batch.
 
     Returns
@@ -79,8 +79,9 @@ def diffusion_loss(
     t = _sample_t(B, S, t_rng, cfg.sampling_eps_min, cfg.sampling_eps_max)
     loss_scale, p = schedule(t)
 
-    # 2. Corrupt tokens (x_t)
-    xt = q_xt(model.backbone.token_embed.num_embeddings - 1, input_ids, p, mask_rng)
+    # 2. Corrupt tokens (x_t) - use vocab_size from cfg instead of accessing model.backbone
+    mask_index = cfg.vocab_size - 1  # Last token is mask token
+    xt = q_xt(mask_index, input_ids, p, mask_rng)
 
     # 3. Handle cross-attention variant (concat x_t + x0)
     if cfg.cross_attn:
@@ -90,32 +91,60 @@ def diffusion_loss(
 
     # 4. Forward pass – returns logits for all positions
     timesteps = _sigma_from_p(p[:, 0:1], schedule)  # (B, 1)
-    (logits, _), new_mutables = model.apply(
+    
+    # Create a dedicated PRNG key for the dropout
+    rng, dropout_rng = jax.random.split(rng)
+    
+    # Flax model.apply with mutable=... returns (outputs, mutated_variables)
+    output, new_mutables = model.apply(
         {"params": params},
         model_input,
         timesteps=timesteps,
         mutable=["batch_stats"] if cfg.adaln else [],
         deterministic=False,
+        rngs={"dropout": dropout_rng},  # Provide dropout PRNG key
     )
+    
+    # Extract logits from the model output
+    logits = output
 
     if cfg.cross_attn:
         logits = logits[:, :S]  # keep x_t stream only for loss
 
     # 5. SUBS parametrisation – see original Diffusion._subs_parameterization.
-    mask_index = model.backbone.token_embed.num_embeddings - 1
     neg_inf = -1e8
+    
+    # Update logits for mask token (adding neg_inf to mask index)
     logits = logits.at[:, :, mask_index].add(neg_inf)
+    
+    # Normalize logits (subtract logsumexp for numerical stability)
     logits = logits - jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-    unmasked = xt != mask_index
-    logits = logits.at[unmasked].set(neg_inf)
-    logits = logits.at[unmasked, input_ids[unmasked]].set(0.0)
+    
+    # Create boolean mask for unmasked tokens
+    unmasked = (xt != mask_index)
+    
+    # Instead of using boolean indexing directly, use arithmetic operations with the mask
+    # to selectively update values (JAX-compatible approach)
+    unmasked_mask = unmasked[:, :, None]  # Add vocab dimension for broadcasting
+    target_mask = jnp.zeros_like(logits)
+    
+    # For unmasked tokens, set all logits to neg_inf except the true token
+    neg_inf_mask = jnp.where(unmasked_mask, jnp.ones_like(logits) * neg_inf, jnp.zeros_like(logits))
+    logits = logits + neg_inf_mask
+    
+    # For unmasked tokens, set the true token logit to 0
+    # Create one-hot encoding for the target tokens
+    target_one_hot = jax.nn.one_hot(input_ids, logits.shape[-1])
+    # Only apply for unmasked tokens
+    zeros_for_targets = jnp.where(unmasked_mask, target_one_hot * -neg_inf, jnp.zeros_like(logits))
+    logits = logits + zeros_for_targets
 
     # 6. NLL
     log_p_theta = jnp.take_along_axis(logits, input_ids[..., None], axis=-1)[..., 0]
     per_token_loss = -loss_scale * log_p_theta * attn_mask
     mean_loss = per_token_loss.sum() / attn_mask.sum()
 
-    metrics = LossMetrics()
-    metrics["loss"] = mean_loss
+    metrics = create_metrics(mean_loss)
 
+    # Ensure we return exactly (loss, metrics, new_mutables)
     return mean_loss, metrics, new_mutables 

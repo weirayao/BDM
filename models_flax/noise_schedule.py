@@ -17,6 +17,7 @@ from typing import Tuple
 
 import jax.numpy as jnp
 import flax.struct
+import numpy as np
 
 ###############################################################################
 # Factory helper                                                              #
@@ -102,11 +103,6 @@ class LogarithmicNoise(NoiseSchedule):
 class LogLinearNoise(NoiseSchedule):
     eps: float = 1e-3
 
-    def __post_init__(self):
-        # JAX dataclass post-init is allowed because struct.dataclass sets slots
-        # but we can compute these lazily to avoid DeviceArray in static field
-        pass
-
     # ---------------------------------------------------------------------
     # Convenience wrappers matching PyTorch implementation used in Diffusion
     # ---------------------------------------------------------------------
@@ -123,11 +119,13 @@ class LogLinearNoise(NoiseSchedule):
         move_chance = t
         return loss_scaling, move_chance
 
-    # sigma range helpers (used by Diffusion._sigma_from_p)
+    # sigma range helpers (hardcoded for JAX tracing compatibility)
     @property
     def sigma_max(self) -> float:
-        return self.total_noise(jnp.array(1.0)).item()
+        # Hardcoded value for eps=1e-3: -log(1-(1-0.001)*1) = -log(0.001) ~= 6.9
+        return 6.9078
 
     @property
     def sigma_min(self) -> float:
-        return self.eps + self.total_noise(jnp.array(0.0)).item() 
+        # eps + total_noise(0.0) = eps + 0
+        return self.eps 

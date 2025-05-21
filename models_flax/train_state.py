@@ -23,6 +23,7 @@ class TrainState(ts.TrainState):
     """
 
     ema_params: Any
+    ema_decay: float = flax.struct.field(pytree_node=False)
     mutable_state: Optional[Any] = None
 
     @classmethod
@@ -44,8 +45,6 @@ class TrainState(ts.TrainState):
             mutable_state=None,
             ema_decay=ema_decay,
         )
-
-    ema_decay: float = flax.struct.field(pytree_node=False)
 
     # ------------------------------------------------------------------
     # Flax `TrainState` API overrides

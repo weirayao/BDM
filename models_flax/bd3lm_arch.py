@@ -32,7 +32,7 @@ import flax.struct  # immutable dataclass
 class BD3LMConfig:
     """Lightweight config object (pytree) usable with JAX / Flax."""
     # Architecture
-    block_size: int = 1
+    block_size: int = 2
     vocab_size: int = 50_258
     model_length: int = 1_024  # context length for the diffusion input
     cross_attn: bool = True  # use two-stream (x_t + x_0) attention mask
@@ -89,7 +89,7 @@ def block_diff_mask(
     block_diag = (block_q == block_k) & (x0_flag_q == x0_flag_k)
     offset_block_causal = (block_q > block_k) & x0_flag_k & (~x0_flag_q)
     block_causal = (block_q >= block_k) & x0_flag_k & x0_flag_q
-
+    breakpoint()
     return block_diag | offset_block_causal | block_causal
 
 
@@ -185,18 +185,33 @@ class DDiTBlock(nn.Module):
         sigma_emb: Optional[jnp.ndarray],
         attn_mask: Optional[jnp.ndarray],
         deterministic: bool,
+        custom_attn_mask: Optional[jnp.ndarray] = None,
     ) -> jnp.ndarray:
         assert x.ndim == 3  # (B, S, D)
         B, S, D = x.shape
         H = self.cfg.n_heads
         head_dim = D // H
 
+        # Use custom attention mask if provided (for sampling)
+        if custom_attn_mask is not None:
+            attn_mask = custom_attn_mask
+            
         # AdaLN parameters
         if self.cfg.adaln:
             assert sigma_emb is not None, "AdaLN enabled but sigma_emb is None"
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = jnp.split(
-                self.ada_mod(sigma_emb)[:, None, :], 6, axis=2
-            )
+            # Calculate output dimension to ensure proper reshaping
+            hidden_dim = self.cfg.hidden_dim
+            # Compute ada_mod outputs and reshape properly
+            ada_mod_output = self.ada_mod(sigma_emb)  # [B, 6*hidden_dim]
+            ada_mod_output = ada_mod_output.reshape(-1, 6, hidden_dim)  # [B, 6, hidden_dim]
+            
+            # Extract the components directly - no splitting needed
+            shift_msa = ada_mod_output[:, 0][:, None, :]  # [B, 1, hidden_dim]
+            scale_msa = ada_mod_output[:, 1][:, None, :]
+            gate_msa = ada_mod_output[:, 2][:, None, :]
+            shift_mlp = ada_mod_output[:, 3][:, None, :]
+            scale_mlp = ada_mod_output[:, 4][:, None, :]
+            gate_mlp = ada_mod_output[:, 5][:, None, :]
         else:
             shift_msa = scale_msa = gate_msa = shift_mlp = scale_mlp = gate_mlp = None
 
@@ -274,6 +289,7 @@ class BD3LMBackbone(nn.Module):
         timesteps: Optional[jnp.ndarray] = None,
         deterministic: bool = True,
         output_hidden_states: bool = False,
+        custom_attn_mask: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, Optional[List[jnp.ndarray]]]:
         """Forward pass returning (logits, hidden_states?)."""
         x = self.token_embed(input_ids)
@@ -286,7 +302,10 @@ class BD3LMBackbone(nn.Module):
             sigma_emb = None
 
         # Build mask once for given sequence length if cross_attn disabled
-        if self.cfg.cross_attn:
+        if custom_attn_mask is not None:
+            # Use the custom mask if provided (for sampling)
+            attn_mask = custom_attn_mask
+        elif self.cfg.cross_attn:
             attn_mask = self.variables["params"]["attn_mask"]
             # For training: slice since seq_len may be shorter (e.g., cropped)
             L = input_ids.shape[1]
@@ -302,6 +321,7 @@ class BD3LMBackbone(nn.Module):
                 sigma_emb=sigma_emb,
                 attn_mask=attn_mask,
                 deterministic=deterministic,
+                custom_attn_mask=custom_attn_mask,
             )
             if output_hidden_states:
                 hidden_states.append(x)
